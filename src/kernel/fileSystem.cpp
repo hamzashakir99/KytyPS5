@@ -16,10 +16,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cinttypes>
 #include <climits>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <random>
 #include <system_error>
 #include <vector>
@@ -631,6 +633,8 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 		return KERNEL_ERROR_EIO;
 	}
 
+	RecordIoEvent("read", Common::PathToString(file->real_name), reinterpret_cast<uint64_t>(buf),
+	              pos, nbytes, bytes_read);
 	LOGF("\tRead %u bytes from: %s\n", bytes_read, Common::PathToString(file->real_name).c_str());
 
 	return bytes_read;
@@ -758,6 +762,8 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 		return KERNEL_ERROR_EIO;
 	}
 
+	RecordIoEvent("pread", Common::PathToString(file->real_name), reinterpret_cast<uint64_t>(buf),
+	              static_cast<uint64_t>(offset), nbytes, bytes_read);
 	LOGF("\tRead %u bytes (pos = %" PRId64 ") from: %s\n", bytes_read, offset,
 	     Common::PathToString(file->real_name).c_str());
 
@@ -859,6 +865,9 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 	if (!file->f.Seek(position)) {
 		return KERNEL_ERROR_EIO;
 	}
+	RecordIoEvent("preadv", Common::PathToString(file->real_name),
+	              buffers.empty() ? 0 : reinterpret_cast<uint64_t>(buffers[0].iov_base),
+	              static_cast<uint64_t>(offset), total, bytes_read);
 	LOGF("\tReadv %" PRId64 " bytes (pos = %" PRId64 ", iovcnt = %d) from: %s\n", bytes_read,
 	     offset, iovcnt, Common::PathToString(file->real_name).c_str());
 	return bytes_read;
@@ -1399,6 +1408,61 @@ int KYTY_SYSV_ABI KernelCheckReachability(const char* path) {
 	}
 
 	return KERNEL_ERROR_ENOENT;
+}
+
+namespace {
+
+struct IoEvent {
+	uint64_t sequence;
+	int      thread_id;
+	char     kind[12];
+	uint64_t address;
+	uint64_t offset;
+	uint64_t size;
+	int64_t  result;
+	char     path[160];
+};
+
+constexpr size_t IO_EVENT_COUNT = 64;
+
+IoEvent    g_io_events[IO_EVENT_COUNT] {};
+uint64_t   g_io_event_sequence = 0;
+std::mutex g_io_events_mutex;
+
+} // namespace
+
+void RecordIoEvent(const char* kind, const std::string& path, uint64_t address, uint64_t offset,
+                   uint64_t size, int64_t result) {
+	std::lock_guard lock(g_io_events_mutex);
+	auto&           event = g_io_events[g_io_event_sequence % IO_EVENT_COUNT];
+	event.sequence        = ++g_io_event_sequence;
+	event.thread_id       = Common::Thread::GetThreadIdUnique();
+	event.address         = address;
+	event.offset          = offset;
+	event.size            = size;
+	event.result          = result;
+	std::snprintf(event.kind, sizeof(event.kind), "%s", kind);
+	// Keep the tail of long host paths: the file name is the useful part.
+	const size_t skip = path.size() >= sizeof(event.path) ? path.size() - sizeof(event.path) + 1 : 0;
+	std::snprintf(event.path, sizeof(event.path), "%s", path.c_str() + skip);
+}
+
+void PrintRecentIoEvents() {
+	// The faulting thread may have been interrupted while recording; never block the reporter.
+	std::unique_lock lock(g_io_events_mutex, std::try_to_lock);
+	if (!lock.owns_lock()) {
+		std::printf("recent io: (busy)\n");
+		return;
+	}
+	const uint64_t count = std::min<uint64_t>(g_io_event_sequence, IO_EVENT_COUNT);
+	std::printf("recent io (oldest first, %" PRIu64 " total):\n", g_io_event_sequence);
+	for (uint64_t i = g_io_event_sequence - count; i < g_io_event_sequence; i++) {
+		const auto& event = g_io_events[i % IO_EVENT_COUNT];
+		std::printf("  #%-6" PRIu64 " t%-4d %-8s addr=%016" PRIx64 " off=%010" PRIx64
+		            " size=%08" PRIx64 " res=%" PRId64 " %s\n",
+		            event.sequence, event.thread_id, event.kind, event.address, event.offset,
+		            event.size, event.result, event.path);
+	}
 }
 
 } // namespace Libs::LibKernel::FileSystem

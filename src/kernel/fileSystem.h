@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <string>
 
 namespace Libs::LibKernel::FileSystem {
 
@@ -75,6 +76,12 @@ int KYTY_SYSV_ABI     KernelGetdents(int fd, char* buf, int nbytes);
 int KYTY_SYSV_ABI     KernelMkdir(const char* path, uint16_t mode);
 int KYTY_SYSV_ABI     KernelRmdir(const char* path);
 int KYTY_SYSV_ABI     KernelCheckReachability(const char* path);
+
+// Crash diagnostics: a short history of guest reads and memory remaps, printed by the fatal
+// fault reporter so a crash on bad data can be traced back to where the data came from.
+void RecordIoEvent(const char* kind, const std::string& path, uint64_t address, uint64_t offset,
+                   uint64_t size, int64_t result);
+void PrintRecentIoEvents();
 
 } // namespace Libs::LibKernel::FileSystem
 

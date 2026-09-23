@@ -13,6 +13,7 @@
 #include "common/threads.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "loader/elf.h"
@@ -811,7 +812,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 		}
 		std::printf("--- Guest fault context ---\n");
-		std::printf("thread: %s\n", thread_name);
+		std::printf("thread: %s (t%d)\n", thread_name, Common::Thread::GetThreadIdUnique());
 		std::printf("rax=%016" PRIx64 " rbx=%016" PRIx64 " rcx=%016" PRIx64 " rdx=%016" PRIx64 "\n"
 		            "rsi=%016" PRIx64 " rdi=%016" PRIx64 " rbp=%016" PRIx64 " rsp=%016" PRIx64 "\n"
 		            "r8 =%016" PRIx64 " r9 =%016" PRIx64 " r10=%016" PRIx64 " r11=%016" PRIx64 "\n"
@@ -835,6 +836,60 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 			std::printf("\n");
 		}
+		// The current frame's locals, including slots a leaf function keeps below RSP.
+		constexpr uint64_t FRAME_DUMP_BELOW = 0x180;
+		constexpr uint64_t FRAME_DUMP_ABOVE = 0x10;
+		std::vector<uint64_t> pointer_candidates = {
+		    info->rax, info->rbx, info->rcx, info->rdx, info->rsi, info->rdi, info->r8,
+		    info->r9,  info->r10, info->r11, info->r12, info->r13, info->r14, info->r15};
+		if (info->rbp > info->rsp && info->rbp - info->rsp < 0x10000 &&
+		    IsReadableRange(info->rbp - FRAME_DUMP_BELOW, FRAME_DUMP_BELOW + FRAME_DUMP_ABOVE)) {
+			const auto* frame =
+			    reinterpret_cast<const uint64_t*>(info->rbp - FRAME_DUMP_BELOW);
+			std::printf("frame (rbp-0x%" PRIx64 " .. rbp+0x%" PRIx64 "):", FRAME_DUMP_BELOW,
+			            FRAME_DUMP_ABOVE);
+			for (uint64_t i = 0; i < (FRAME_DUMP_BELOW + FRAME_DUMP_ABOVE) / 8; i++) {
+				if (i % 4 == 0) {
+					const auto offset = static_cast<int64_t>(i * 8) -
+					                    static_cast<int64_t>(FRAME_DUMP_BELOW);
+					std::printf("\n  rbp%c0x%03" PRIx64 ":", offset < 0 ? '-' : '+',
+					            static_cast<uint64_t>(offset < 0 ? -offset : offset));
+				}
+				std::printf(" %016" PRIx64, frame[i]);
+				pointer_candidates.push_back(frame[i]);
+			}
+			std::printf("\n");
+		}
+		// Memory behind register and frame values that look like data pointers.
+		std::sort(pointer_candidates.begin(), pointer_candidates.end());
+		pointer_candidates.erase(std::unique(pointer_candidates.begin(), pointer_candidates.end()),
+		                         pointer_candidates.end());
+		int dumped = 0;
+		for (const uint64_t value: pointer_candidates) {
+			const uint64_t start = (value & ~uint64_t {0xf}) - 0x10;
+			if (value < 0x100000 || value > 0x0000800000000000ull || dumped >= 32 ||
+			    !IsReadableRange(start, 0x40)) {
+				continue;
+			}
+			const auto* bytes = reinterpret_cast<const uint8_t*>(start);
+			std::printf("mem @%016" PRIx64 " (for %016" PRIx64 "):", start, value);
+			for (int i = 0; i < 0x40; i++) {
+				std::printf("%s%02x", (i % 32 == 0) ? "\n  " : " ", bytes[i]);
+			}
+			std::printf("\n");
+			dumped++;
+		}
+		// Callers via the RBP chain; guest code keeps frame pointers.
+		void*     callers[16];
+		const int depth = WalkGuestStack(info->rbp, info->rsp, callers,
+		                                 static_cast<int>(std::size(callers)));
+		std::printf("callers:");
+		for (int i = 0; i < depth; i++) {
+			std::printf("%s %016" PRIx64, (i % 4 == 0) ? "\n " : "",
+			            reinterpret_cast<uint64_t>(callers[i]));
+		}
+		std::printf("\n");
+		Libs::LibKernel::FileSystem::PrintRecentIoEvents();
 		std::fflush(stdout);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64

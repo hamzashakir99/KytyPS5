@@ -1369,6 +1369,9 @@ static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_r
 				uint64_t bytes_read = 0;
 				auto result = ReadHostFileToGuest(host_path, command.file_offset,
 				                                  command.destination, command.size, &bytes_read);
+				LibKernel::FileSystem::RecordIoEvent(
+				    "apr-read", host_path, command.destination, command.file_offset, command.size,
+				    result == OK ? static_cast<int64_t>(bytes_read) : result);
 				if (result != OK) {
 					LOGF("\tAPR submit read failed: id=0x%08" PRIx32 ", result=0x%08" PRIx32
 					     ", path=%s\n",
@@ -1411,6 +1414,9 @@ static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_r
 				} else {
 					result = ExecuteAmmMapCommand(command);
 				}
+				LibKernel::FileSystem::RecordIoEvent(
+				    command.kind == AmmCommandKind::Unmap ? "amm-unmap" : "amm-map", {}, command.va,
+				    command.dmem_offset, command.size, result);
 
 				if (result != OK) {
 					LOGF("\tAMM submit command failed: kind=%u va=0x%016" PRIx64
