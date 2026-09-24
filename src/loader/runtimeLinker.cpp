@@ -780,11 +780,47 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+// Crash diagnostics: the last faults each thread survived. A handled fault still builds its
+// exception frame on the guest stack, so this shows where a guest red zone could have been lost.
+struct HandledFault {
+	uint64_t rip;
+	uint64_t rsp;
+	uint64_t address;
+	char     kind;
+};
+
+struct HandledFaultHistory {
+	static constexpr size_t COUNT = 16;
+	HandledFault            entries[COUNT];
+	uint64_t                total;
+};
+
+static thread_local HandledFaultHistory g_handled_faults {};
+
+static void RecordHandledFault(const Common::HostException::ExceptionInfo* info, char kind) {
+	auto& entry = g_handled_faults.entries[g_handled_faults.total % HandledFaultHistory::COUNT];
+	entry       = {info->exception_address, info->rsp, info->access_violation_vaddr, kind};
+	g_handled_faults.total++;
+}
+
+static void PrintHandledFaults() {
+	const auto& history = g_handled_faults;
+	const auto  count   = std::min<uint64_t>(history.total, HandledFaultHistory::COUNT);
+	std::printf("handled faults on this thread (oldest first, %" PRIu64 " total):\n", history.total);
+	for (uint64_t i = history.total - count; i < history.total; i++) {
+		const auto& entry = history.entries[i % HandledFaultHistory::COUNT];
+		std::printf("  #%-6" PRIu64 " %c rip=%016" PRIx64 " rsp=%016" PRIx64 " addr=%016" PRIx64
+		            "\n",
+		            i + 1, entry.kind, entry.rip, entry.rsp, entry.address);
+	}
+}
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
 	if (info->type == Common::HostException::ExceptionType::IllegalInstruction &&
 	    Loader::X64InstructionEmulator::TryEmulate(info->native_context)) {
+		RecordHandledFault(info, 'I');
 		return true;
 	}
 
@@ -799,6 +835,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Unknown: return false;
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
+			RecordHandledFault(info, access == GpuAccess::Write ? 'W' : 'R');
 			return true;
 		}
 	}
@@ -889,6 +926,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			            reinterpret_cast<uint64_t>(callers[i]));
 		}
 		std::printf("\n");
+		PrintHandledFaults();
 		Libs::LibKernel::FileSystem::PrintRecentIoEvents();
 		std::fflush(stdout);
 	}
@@ -2215,6 +2253,18 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			     result.stack_dependent_memory_instruction_count,
 			     result.control_flow_memory_instruction_count,
 			     result.unrelocatable_memory_instruction_count);
+			std::printf("Red-zone patching: %s segment=%016" PRIx64 "+%" PRIx64
+			            " trampolines=%016" PRIx64 "+%" PRIx64 " functions=%" PRIu64
+			            " red_zone=%" PRIu64 " memory=%" PRIu64 " patched=%" PRIu64
+			            " stack=%" PRIu64 " control=%" PRIu64 " unrelocatable=%" PRIu64 "\n",
+			            Common::PathToString(program->file_name.filename()).c_str(), segment_addr,
+			            segment_size, program->red_zone_trampoline_vaddr,
+			            program->red_zone_trampoline_size, result.function_count,
+			            result.red_zone_function_count, result.memory_instruction_count,
+			            result.patched_memory_instruction_count,
+			            result.stack_dependent_memory_instruction_count,
+			            result.control_flow_memory_instruction_count,
+			            result.unrelocatable_memory_instruction_count);
 			reciprocal_sqrt_count = result.reciprocal_sqrt_instruction_count;
 		}
 #else
