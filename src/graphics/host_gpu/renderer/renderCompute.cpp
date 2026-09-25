@@ -264,6 +264,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
+	// Workaround: PPSA10595's UE clustered-lighting compute pass (60x34x16 groups) loses the
+	// Vulkan device on NVIDIA. Its loops are bounded and uniform; the root cause is not known yet,
+	// so skip it (lighting in that pass is lost) until it is.
+	if (program.shader_hash == 0x4ff7e23c715ac086ull) {
+		ResetBindings();
+		return;
+	}
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
 		ResetBindings();
 		return;
