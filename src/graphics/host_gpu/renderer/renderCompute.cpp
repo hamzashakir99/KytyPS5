@@ -26,6 +26,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -267,7 +268,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	// Workaround: PPSA10595's UE clustered-lighting compute pass (60x34x16 groups) loses the
 	// Vulkan device on NVIDIA. Its loops are bounded and uniform; the root cause is not known yet,
 	// so skip it (lighting in that pass is lost) until it is.
-	if (program.shader_hash == 0x4ff7e23c715ac086ull) {
+	// Diagnostic switch: KYTY_RUN_LIGHTING=1 runs it anyway.
+	static const bool run_lighting = std::getenv("KYTY_RUN_LIGHTING") != nullptr;
+	if (!run_lighting && program.shader_hash == 0x4ff7e23c715ac086ull) {
 		ResetBindings();
 		return;
 	}
