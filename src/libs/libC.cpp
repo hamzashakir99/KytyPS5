@@ -17,6 +17,7 @@
 #include <cctype>
 #include <chrono>
 #include <cinttypes>
+#include <cstdio>
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
@@ -75,6 +76,10 @@ const char** GetArgv() {
 static KYTY_SYSV_ABI void exit(int code) {
 	PRINT_NAME();
 
+	std::printf("Guest libc exit(%d / 0x%08x) called from 0x%016" PRIx64 "\n", code,
+	            static_cast<uint32_t>(code),
+	            reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	std::fflush(stdout);
 	::exit(code);
 }
 

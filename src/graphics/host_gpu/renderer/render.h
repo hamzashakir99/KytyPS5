@@ -100,6 +100,10 @@ struct SubmitInfo {
 	}
 };
 
+// Device-lost diagnostics: record NV checkpoints on this queue and print what the GPU reached.
+void EnableDeviceCheckpoints(vk::Queue queue);
+void PrintDeviceCheckpoints();
+
 class CommandBuffer {
 public:
 	~CommandBuffer() = default;

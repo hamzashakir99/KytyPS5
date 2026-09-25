@@ -2,6 +2,10 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/render.h"
+
+#include <cinttypes>
+#include <cstdio>
 
 namespace Libs::Graphics {
 
@@ -50,6 +54,10 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pValues        = &tick;
 
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	if (result == vk::Result::eErrorDeviceLost) {
+		std::printf("vkWaitSemaphores failed: ErrorDeviceLost, tick=%" PRIu64 "\n", tick);
+		PrintDeviceCheckpoints();
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
 }

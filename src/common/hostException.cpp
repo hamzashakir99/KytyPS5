@@ -112,6 +112,24 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 	} else if (exception_record->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION) {
 		info.type = ExceptionType::IllegalInstruction;
 	} else {
+		// Report other fatal exceptions (stack overflow above all) before Windows ends the
+		// process silently. A static buffer and WriteFile keep this safe on a spent stack.
+		const auto code = exception_record->ExceptionCode;
+		if (code == EXCEPTION_STACK_OVERFLOW || code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
+		    code == EXCEPTION_PRIV_INSTRUCTION || code == EXCEPTION_IN_PAGE_ERROR) {
+			static char message[160];
+			const int   length = std::snprintf(
+                message, sizeof(message),
+                "Fatal host exception 0x%08lx thread=%lu rip=0x%016llx rsp=0x%016llx "
+                "exe=0x%016llx\n",
+                static_cast<unsigned long>(code), GetCurrentThreadId(),
+                static_cast<unsigned long long>(exception->ContextRecord->Rip),
+                static_cast<unsigned long long>(exception->ContextRecord->Rsp),
+                reinterpret_cast<unsigned long long>(GetModuleHandleW(nullptr)));
+			DWORD written = 0;
+			WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), message, static_cast<DWORD>(length),
+			          &written, nullptr);
+		}
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
 
@@ -132,11 +150,55 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 	info.r14 = exception->ContextRecord->R14;
 	info.r15 = exception->ContextRecord->R15;
 
-	const auto handler = g_handler.load(std::memory_order_acquire);
-	if (handler != nullptr && handler(info)) {
-		return EXCEPTION_CONTINUE_EXECUTION;
+	// A fault inside the handler's own reporting would kill the process silently, so name the
+	// original fault first whenever it is not one the emulator resolves (those return early).
+	static thread_local int      depth         = 0;
+	static thread_local uint64_t original_rip  = 0;
+	static thread_local uint64_t original_addr = 0;
+	if (depth > 0) {
+		static char message[224];
+		const int   length = std::snprintf(
+            message, sizeof(message),
+            "Nested host exception 0x%08lx thread=%lu rip=0x%016llx addr=0x%016llx while "
+            "handling rip=0x%016llx addr=0x%016llx\n",
+            static_cast<unsigned long>(exception_record->ExceptionCode), GetCurrentThreadId(),
+            static_cast<unsigned long long>(info.exception_address),
+            static_cast<unsigned long long>(info.access_violation_vaddr),
+            static_cast<unsigned long long>(original_rip),
+            static_cast<unsigned long long>(original_addr));
+		DWORD written = 0;
+		WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), message, static_cast<DWORD>(length), &written,
+		          nullptr);
+		return EXCEPTION_CONTINUE_SEARCH;
 	}
-	return EXCEPTION_CONTINUE_SEARCH;
+	depth++;
+	original_rip       = info.exception_address;
+	original_addr      = info.access_violation_vaddr;
+	const auto handler = g_handler.load(std::memory_order_acquire);
+	const bool handled = handler != nullptr && handler(info);
+	depth--;
+	if (!handled) {
+		// The handler reports and exits on every fault it recognises, so anything declined here
+		// ends the process through Windows Error Reporting without another word. Name it.
+		static char message[256];
+		const auto  params = exception_record->NumberParameters;
+		const int   length = std::snprintf(
+            message, sizeof(message),
+            "Declined host exception 0x%08lx thread=%lu rip=0x%016llx params=%lu "
+            "info0=0x%016llx info1=0x%016llx flags=0x%lx\n",
+            static_cast<unsigned long>(exception_record->ExceptionCode), GetCurrentThreadId(),
+            static_cast<unsigned long long>(info.exception_address),
+            static_cast<unsigned long>(params),
+            static_cast<unsigned long long>(params > 0 ? exception_record->ExceptionInformation[0]
+                                                       : 0),
+            static_cast<unsigned long long>(params > 1 ? exception_record->ExceptionInformation[1]
+                                                       : 0),
+            static_cast<unsigned long>(exception_record->ExceptionFlags));
+		DWORD written = 0;
+		WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), message, static_cast<DWORD>(length), &written,
+		          nullptr);
+	}
+	return handled ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
 
 #elif defined(__APPLE__)
